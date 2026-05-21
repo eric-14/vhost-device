@@ -23,10 +23,22 @@ use vhost_user_backend::{VringEpollHandler, VringRwLock, VringT};
 use virtio_queue::QueueOwnedT;
 use virtio_vsock::packet::{VsockPacket, PKT_HEADER_SIZE};
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
+
+
+use mio::event::Event;
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Registry, Token};
+use vmm_sys_util::event::EventNotifier;
+
+use std::sync::Mutex;
+
 use vmm_sys_util::{
     epoll::EventSet,
     eventfd::{EventFd, EFD_NONBLOCK},
 };
+
+
+// use vmm_sys_util::event::{EventConsumer, EventNotifier};
 #[cfg(feature = "backend_vsock")]
 use vsock::{VsockListener, VMADDR_CID_ANY};
 
@@ -69,8 +81,10 @@ pub(crate) struct VhostUserVsockThread {
     backend_info: BackendType,
     /// Host socket raw file descriptor and listener.
     host_listeners_map: HashMap<i32, ListenerType>,
-    /// epoll fd to which new host connections are added.
-    epoll_file: File,
+    /// poll fd to which new host connections are added.
+// poll_file: File,
+    //poller which host connections are added 
+    poller: Mutex<Poll>, 
     /// VsockThreadBackend instance.
     pub thread_backend: VsockThreadBackend,
     /// CID of the guest.
@@ -84,7 +98,12 @@ pub(crate) struct VhostUserVsockThread {
     /// EventFd to notify this thread for custom events. Currently used to
     /// notify this thread to process raw vsock packets sent from a sibling
     /// VM.
-    pub sibling_event_fd: EventFd,
+
+    // pub sibling_event_fd: EventFd,
+    /// EventNotifier to notify this thread for custom events. Currently used to
+    /// notify this thread to process raw vsock packets sent from a sibling
+    /// VM.
+    pub sibling_event_notifier: EventNotifier,
     /// Keeps track of which RX queue was processed first in the last iteration.
     /// Used to alternate between the RX queues to prevent the starvation of one
     /// by the other.
@@ -122,6 +141,7 @@ impl VhostUserVsockThread {
                 }
             }
         }
+        let mut poller = Mutex::new(Poll::new()?); 
 
         let epoll_fd = epoll::create(true).map_err(Error::EpollFdCreate)?;
         // SAFETY: Safe as the fd is guaranteed to be valid here.
@@ -135,7 +155,7 @@ impl VhostUserVsockThread {
 
         let thread_backend = VsockThreadBackend::new(
             backend_info.clone(),
-            epoll_fd,
+            poller,
             guest_cid,
             tx_buffer_size,
             groups_set.clone(),
@@ -172,7 +192,7 @@ impl VhostUserVsockThread {
             event_idx: false,
             backend_info: backend_info.clone(),
             host_listeners_map,
-            epoll_file,
+            poller,
             thread_backend,
             guest_cid,
             sender,
@@ -221,33 +241,75 @@ impl VhostUserVsockThread {
         }
     }
     /// Register a file with an epoll to listen for events in evset.
-    pub fn epoll_register(epoll_fd: RawFd, fd: RawFd, evset: epoll::Events) -> Result<()> {
-        epoll::ctl(
-            epoll_fd,
-            epoll::ControlOptions::EPOLL_CTL_ADD,
-            fd,
-            epoll::Event::new(evset, fd as u64),
-        )
-        .map_err(Error::EpollAdd)?;
+    // pub fn epoll_register(epoll_fd: RawFd, fd: RawFd, evset: epoll::Events) -> Result<()> {
+    //     epoll::ctl(
+    //         epoll_fd,
+    //         epoll::ControlOptions::EPOLL_CTL_ADD,
+    //         fd,
+    //         epoll::Event::new(evset, fd as u64),
+    //     )
+    //     .map_err(Error::EpollAdd)?;
+
+    //     Ok(())
+    // }
+    /// Register a file with an mio::poll to listen for events in interests.
+    pub fn poll_register(poller: &Mutex<Poll>, fd: RawFd, interests: Interest) -> Result<()> {
+       let mut source = SourceFd(&fd);
+
+        poller.lock().unwrap()
+        .registry().register(
+            source, 
+            Token(fd as u64), 
+            interests)
+        .map_err(Error::pollAdd)?;
 
         Ok(())
     }
 
-    /// Remove a file from the epoll.
-    pub fn epoll_unregister(epoll_fd: RawFd, fd: RawFd) -> Result<()> {
-        epoll::ctl(
-            epoll_fd,
-            epoll::ControlOptions::EPOLL_CTL_DEL,
-            fd,
-            epoll::Event::new(epoll::Events::empty(), 0),
-        )
-        .map_err(Error::EpollRemove)?;
+   
+    // pub fn epoll_unregister(epoll_fd: RawFd, fd: RawFd) -> Result<()> {
+    //     epoll::ctl(
+    //         epoll_fd,
+    //         epoll::ControlOptions::EPOLL_CTL_DEL,
+    //         fd,
+    //         epoll::Event::new(epoll::Events::empty(), 0),
+    //     )
+    //     .map_err(Error::EpollRemove)?;
+
+    //     Ok(())
+    // }
+
+    /// Remove a file from the mio::poller.
+    pub fn poll_unregister(poller: &Mutex<Poll>, fd: RawFd) -> Result<()> {
+
+        let mut source = SourceFd(&fd); 
+
+        poller.lock().unwrap()
+        .registry().deregister(&mut source)
+        .map_err(Error::PollRemove)?;
 
         Ok(())
     }
 
     /// Modify the events we listen to for the fd in the epoll.
-    pub fn epoll_modify(epoll_fd: RawFd, fd: RawFd, evset: epoll::Events) -> Result<()> {
+    // pub fn epoll_modify(epoll_fd: RawFd, fd: RawFd, evset: epoll::Events) -> Result<()> {
+    //     epoll::ctl(
+    //         epoll_fd,
+    //         epoll::ControlOptions::EPOLL_CTL_MOD,
+    //         fd,
+    //         epoll::Event::new(evset, fd as u64),
+    //     )
+    //     .map_err(Error::EpollModify)?;
+
+    //     Ok(())
+    // }
+
+    /// Modify the events we listen to for the fd in the epoll.
+    pub fn poll_modify(poller: &Mutex<Poll>, fd: RawFd, interests: Interest) -> Result<()> {
+        let mut source = SourceFd(&fd); 
+
+        poller.lock().unwrap()
+        .register()
         epoll::ctl(
             epoll_fd,
             epoll::ControlOptions::EPOLL_CTL_MOD,
@@ -259,9 +321,9 @@ impl VhostUserVsockThread {
         Ok(())
     }
 
-    /// Return raw file descriptor of the epoll file.
-    fn get_epoll_fd(&self) -> RawFd {
-        self.epoll_file.as_raw_fd()
+    /// Return raw file descriptor of the poll file.
+    fn get_poll_fd(&self) -> RawFd {
+        self.poller.lock().unwrap().as_raw_fd()
     }
 
     /// Register our listeners in the VringEpollHandler

@@ -88,12 +88,12 @@ pub(crate) enum Error {
     UnixAccept(std::io::Error),
     #[error("Failed to bind a unix stream")]
     UnixBind(std::io::Error),
-    #[error("Failed to create an epoll fd")]
-    EpollFdCreate(std::io::Error),
-    #[error("Failed to add to epoll")]
-    EpollAdd(std::io::Error),
-    #[error("Failed to modify evset associated with epoll")]
-    EpollModify(std::io::Error),
+    #[error("Failed to create an mio::poll fd")]
+    PollFdCreate(std::io::Error),
+    #[error("Failed to add to mio::Poll")]
+    PollAdd(std::io::Error),
+    #[error("Failed to modify evset associated with mio::Poll")]
+    PollModify(std::io::Error),
     #[error("Failed to read from unix stream")]
     UnixRead(std::io::Error),
     #[error("Failed to convert byte array to string")]

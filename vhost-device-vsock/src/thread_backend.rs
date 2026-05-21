@@ -11,6 +11,8 @@ use std::{
     result::Result as StdResult,
     sync::{Arc, RwLock},
 };
+use mio::{Poll};
+use std::sync::Mutex;
 
 use log::{info, warn};
 use virtio_vsock::packet::{VsockPacket, PKT_HEADER_SIZE};
@@ -203,7 +205,8 @@ pub(crate) struct VsockThreadBackend {
     /// Host side socket info for listening to new connections from the host.
     backend_info: BackendType,
     /// epoll for registering new host-side connections.
-    epoll_fd: i32,
+    poller: Mutex<Poll>, 
+    //poll_fd: i32,
     /// CID of the guest.
     guest_cid: u64,
     /// Set of allocated local ports.
@@ -224,7 +227,7 @@ impl VsockThreadBackend {
     /// New instance of VsockThreadBackend.
     pub fn new(
         backend_info: BackendType,
-        epoll_fd: i32,
+        poller: Mutex<Poll>,
         guest_cid: u64,
         tx_buffer_size: u32,
         groups_set: Arc<RwLock<HashSet<String>>>,
@@ -238,7 +241,7 @@ impl VsockThreadBackend {
             // TODO: think of a better solution
             stream_map: HashMap::new(),
             backend_info,
-            epoll_fd,
+            poller,
             guest_cid,
             local_port_set: HashSet::new(),
             tx_buffer_size,
@@ -535,7 +538,8 @@ mod tests {
     fn test_vsock_thread_backend(backend_info: BackendType) {
         const CID: u64 = 3;
 
-        let epoll_fd = epoll::create(false).unwrap();
+        //let epoll_fd = epoll::create(false).unwrap();
+        let mut poller = Mutex::new(Poll::new())?; 
 
         let groups_set: HashSet<String> = vec![GROUP_NAME.to_string()].into_iter().collect();
 
@@ -543,7 +547,7 @@ mod tests {
 
         let mut vtp = VsockThreadBackend::new(
             backend_info,
-            epoll_fd,
+            poller,
             CID,
             CONN_TX_BUF_SIZE,
             Arc::new(RwLock::new(groups_set)),
