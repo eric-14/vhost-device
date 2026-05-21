@@ -204,8 +204,8 @@ pub(crate) struct VsockThreadBackend {
     pub stream_map: HashMap<i32, StreamType>,
     /// Host side socket info for listening to new connections from the host.
     backend_info: BackendType,
-    /// epoll for registering new host-side connections.
-    poller: Mutex<Poll>, 
+    /// Poller for registering new host-side connections.
+    poller: Arc<Mutex<Poll>>,
     //poll_fd: i32,
     /// CID of the guest.
     guest_cid: u64,
@@ -227,7 +227,7 @@ impl VsockThreadBackend {
     /// New instance of VsockThreadBackend.
     pub fn new(
         backend_info: BackendType,
-        poller: Mutex<Poll>,
+        poller: Arc<Mutex<Poll>>,
         guest_cid: u64,
         tx_buffer_size: u32,
         groups_set: Arc<RwLock<HashSet<String>>>,
@@ -283,10 +283,10 @@ impl VsockThreadBackend {
             self.listener_map.remove(&conn.stream.as_raw_fd());
             self.stream_map.remove(&conn.stream.as_raw_fd());
             self.local_port_set.remove(&conn.local_port);
-            VhostUserVsockThread::epoll_unregister(conn.epoll_fd, conn.stream.as_raw_fd())
+            VhostUserVsockThread::poll_unregister(&conn.poller, conn.stream.as_raw_fd())
                 .unwrap_or_else(|err| {
                     warn!(
-                        "Could not remove epoll listener for fd {:?}: {:?}",
+                        "Could not remove poll listener for fd {:?}: {:?}",
                         conn.stream.as_raw_fd(),
                         err
                     )
@@ -335,7 +335,7 @@ impl VsockThreadBackend {
             if dst_cid != VSOCK_HOST_CID {
                 let cid_map = self.cid_map.read().unwrap();
                 if cid_map.contains_key(&dst_cid) {
-                    let (sibling_raw_pkts_queue, sibling_groups_set, sibling_event_fd) =
+                    let (sibling_raw_pkts_queue, sibling_groups_set, sibling_event_notifier) =
                         cid_map.get(&dst_cid).unwrap();
 
                     if self
@@ -352,7 +352,7 @@ impl VsockThreadBackend {
                         .write()
                         .unwrap()
                         .push_back(RawVsockPacket::from_vsock_packet(pkt)?);
-                    let _ = sibling_event_fd.write(1);
+                    let _ = sibling_event_notifier.notify();
                 } else {
                     warn!("vsock: dropping packet for unknown cid: {dst_cid:?}");
                 }
@@ -391,10 +391,10 @@ impl VsockThreadBackend {
             self.listener_map.remove(&conn.stream.as_raw_fd());
             self.stream_map.remove(&conn.stream.as_raw_fd());
             self.local_port_set.remove(&conn.local_port);
-            VhostUserVsockThread::epoll_unregister(conn.epoll_fd, conn.stream.as_raw_fd())
+            VhostUserVsockThread::poll_unregister(&conn.poller, conn.stream.as_raw_fd())
                 .unwrap_or_else(|err| {
                     warn!(
-                        "Could not remove epoll listener for fd {:?}: {:?}",
+                        "Could not remove poll listener for fd {:?}: {:?}",
                         conn.stream.as_raw_fd(),
                         err
                     )
@@ -484,7 +484,7 @@ impl VsockThreadBackend {
             pkt.dst_port(),
             pkt.src_cid(),
             pkt.src_port(),
-            self.epoll_fd,
+            self.poller.clone(),
             pkt.buf_alloc(),
             self.tx_buffer_size,
         );
@@ -500,10 +500,10 @@ impl VsockThreadBackend {
         self.stream_map.insert(stream_fd, stream);
         self.local_port_set.insert(pkt.dst_port());
 
-        VhostUserVsockThread::epoll_register(
-            self.epoll_fd,
+        VhostUserVsockThread::poll_register(
+            &self.poller,
             stream_fd,
-            epoll::Events::EPOLLIN | epoll::Events::EPOLLOUT,
+            mio::Interest::READABLE | mio::Interest::WRITABLE,
         )?;
         Ok(())
     }
@@ -538,8 +538,7 @@ mod tests {
     fn test_vsock_thread_backend(backend_info: BackendType) {
         const CID: u64 = 3;
 
-        //let epoll_fd = epoll::create(false).unwrap();
-        let mut poller = Mutex::new(Poll::new())?; 
+        let poller = Arc::new(Mutex::new(Poll::new().unwrap()));
 
         let groups_set: HashSet<String> = vec![GROUP_NAME.to_string()].into_iter().collect();
 
@@ -678,7 +677,7 @@ mod tests {
         let sibling2_backend =
             Arc::new(VhostUserVsockBackend::new(sibling2_config, cid_map.clone()).unwrap());
 
-        let epoll_fd = epoll::create(false).unwrap();
+        let poller = Arc::new(Mutex::new(Poll::new().unwrap()));
 
         let groups_set: HashSet<String> = vec!["groupA", "groupB", "group3"]
             .into_iter()
@@ -687,7 +686,7 @@ mod tests {
 
         let mut vtp = VsockThreadBackend::new(
             BackendType::UnixDomainSocket(vsock_socket_path),
-            epoll_fd,
+            poller,
             CID,
             CONN_TX_BUF_SIZE,
             Arc::new(RwLock::new(groups_set)),
