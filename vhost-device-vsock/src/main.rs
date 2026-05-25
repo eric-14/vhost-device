@@ -458,13 +458,13 @@ pub(crate) fn start_backend_server(
         )
         .map_err(BackendError::CouldNotCreateDaemon)?;
 
-        let mut epoll_handlers = daemon.get_epoll_handlers();
+        let mut poll_handlers = daemon.get_epoll_handlers();
 
         for thread in backend.threads.iter() {
             thread
                 .lock()
                 .unwrap()
-                .register_listeners(epoll_handlers.remove(0));
+                .register_listeners(poll_handlers.remove(0));
         }
 
         if let Err(e) = daemon
@@ -1020,19 +1020,19 @@ mod tests {
         )
         .unwrap();
 
-        let mut epoll_handlers = daemon.get_epoll_handlers();
+        let mut poll_handlers = daemon.get_epoll_handlers();
 
         // VhostUserVsockBackend support a single thread that handles the TX and RX
         // queues
         assert_eq!(backend.threads.len(), 1);
 
-        assert_eq!(epoll_handlers.len(), backend.threads.len());
+        assert_eq!(poll_handlers.len(), backend.threads.len());
 
         for thread in backend.threads.iter() {
             thread
                 .lock()
                 .unwrap()
-                .register_listeners(epoll_handlers.remove(0));
+                .register_listeners(poll_handlers.remove(0));
         }
     }
 
