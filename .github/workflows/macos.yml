@@ -2,10 +2,11 @@ name: macOS CI
 
 on:
   push:
+    branches: [main, master]
   pull_request:
 
 jobs:
-  build:
+  test:
     runs-on: macos-latest
 
     steps:
@@ -15,25 +16,16 @@ jobs:
       - name: Show macOS version
         run: sw_vers
 
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Run script
-        run: echo "Hello from macOS runner"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Show Rust versions
         run: |
           rustc --version
           cargo --version
 
-      - name: test vhost-device-vsock
-        run: cargo test -p vhost-device-vsock
-
-      # - name: Run vhost-user-backend tests
-      #   run: cargo test -p vhost-user-backend --locked -- --nocapture
-
-      # - name: Verify mio is in dependency graph
-      #   run: cargo tree -p vhost-user-backend -i mio
+      - name: Test vhost-device-vsock (no Linux-only features)
+        run: cargo test -p vhost-device-vsock --locked --no-default-features
