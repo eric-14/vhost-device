@@ -29,6 +29,5 @@ jobs:
        -name: Test vhost-device-vsock (no Linux-only features)
         run: cargo test -p vhost-device-vsock 
 
-
-      # - name: Test vhost-device-vsock (no Linux-only features)
-      #   run: cargo test -p vhost-device-vsock --locked --no-default-features
+      - name: Test2 vhost-device-vsock (Linux-only features)
+        run: cargo test -p vhost-device-vsock --locked --no-default-features
