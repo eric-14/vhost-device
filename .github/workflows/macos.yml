@@ -1,0 +1,39 @@
+name: macOS CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Show macOS version
+        run: sw_vers
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Run script
+        run: echo "Hello from macOS runner"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show Rust versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build vhost-user-backend
+        run: cargo build -p vhost-user-backend
+
+      - name: Run vhost-user-backend tests
+        run: cargo test -p vhost-user-backend --locked -- --nocapture
+
+      - name: Verify mio is in dependency graph
+        run: cargo tree -p vhost-user-backend -i mio
