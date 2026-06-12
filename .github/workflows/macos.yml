@@ -26,8 +26,165 @@ jobs:
           rustc --version
           cargo --version
 
-       -name: Test vhost-device-vsock (no Linux-only features)
-        run: cargo test -p vhost-device-vsock 
+      # Unit tests: --no-default-features strips the backend_vsock feature
+      # which pulls in the `vsock` crate (Linux AF_VSOCK sockets only).
+      # The UDS backend — the macOS-compatible path introduced by the
+      # epoll→mio migration — is always compiled regardless of features.
+      - name: Unit tests (macOS-compatible UDS backend)
+        run: cargo test -p vhost-device-vsock --no-default-features
 
-      - name: Test2 vhost-device-vsock (Linux-only features)
-        run: cargo test -p vhost-device-vsock --locked --no-default-features
+      # ── Integration: validate end-to-end host ↔ guest vsock via QEMU ───────
+      #
+      # macOS has no native AF_VSOCK, so both directions use the UDS CONNECT
+      # protocol: the host sends "CONNECT <port>\n" to the daemon's UDS socket,
+      # vhost-device-vsock routes it into the guest's virtio-vsock device.
+      # The resulting connection is full-duplex; each test exercises one data
+      # direction over its own dedicated vsock port.
+
+      - name: Install QEMU
+        run: brew install qemu
+
+      - name: Generate VM SSH key
+        run: ssh-keygen -t ed25519 -f /tmp/vm_key -N ""
+
+      - name: Cache Alpine Linux cloud image
+        id: cache-alpine
+        uses: actions/cache@v4
+        with:
+          path: alpine.qcow2
+          key: alpine-3.21.0-aarch64-cloudinit-v1
+
+      - name: Download Alpine Linux aarch64 cloud image
+        if: steps.cache-alpine.outputs.cache-hit != 'true'
+        run: |
+          curl -fL \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-aarch64-uefi-cloudinit-r0.qcow2" \
+            -o alpine.qcow2
+
+      - name: Create cloud-init seed ISO
+        run: |
+          mkdir -p /tmp/cidata
+
+          cat > /tmp/cidata/meta-data << 'EOF'
+          instance-id: alpine-ci
+          local-hostname: alpine-vm
+          EOF
+
+          # SSH public key is expanded on the host before writing user-data.
+          cat > /tmp/cidata/user-data << EOF
+          #cloud-config
+          package_update: true
+          packages:
+            - socat
+          ssh_authorized_keys:
+            - $(cat /tmp/vm_key.pub)
+          EOF
+
+          # -default-volume-name sets the ISO 9660 label to "cidata", which
+          # cloud-init's NoCloud datasource requires for auto-detection.
+          hdiutil makehybrid \
+            -o /tmp/seed.iso \
+            -hfs -joliet -iso \
+            -default-volume-name cidata \
+            /tmp/cidata/
+
+      # Build without backend_vsock so the binary compiles on macOS.
+      # The UDS backend (uds-path=…) is unconditionally included.
+      - name: Build vhost-device-vsock
+        run: cargo build -p vhost-device-vsock --no-default-features
+
+      - name: Start vhost-device-vsock daemon
+        run: |
+          ./target/debug/vhost-device-vsock \
+            --vm guest-cid=4,uds-path=/tmp/vm4.vsock,socket=/tmp/vhost4.socket,tx-buffer-size=65536,queue-size=1024 &
+          echo $! > /tmp/vhost_pid
+          for i in $(seq 15); do
+            [ -S /tmp/vhost4.socket ] && echo "vhost socket ready" && break
+            sleep 1
+          done
+          [ -S /tmp/vhost4.socket ] || { echo "ERROR: vhost socket never appeared"; exit 1; }
+
+      - name: Start QEMU VM
+        run: |
+          # snapshot=on keeps the cached qcow2 pristine; cloud-init installs
+          # socat on every boot via apk (fast from CDN cache).
+          UEFI_FW="$(brew --prefix)/share/qemu/edk2-aarch64-code.fd"
+          qemu-system-aarch64 \
+            -machine virt,accel=hvf \
+            -cpu host \
+            -smp 2 \
+            -m 512M \
+            -bios "$UEFI_FW" \
+            -drive file=alpine.qcow2,format=qcow2,if=virtio,snapshot=on \
+            -drive file=/tmp/seed.iso,format=raw,if=virtio \
+            -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -chardev socket,id=char0,reconnect=0,path=/tmp/vhost4.socket \
+            -device vhost-user-vsock-pci,chardev=char0 \
+            -nographic \
+            2>&1 | tee /tmp/qemu.log &
+          echo $! > /tmp/qemu_pid
+
+      - name: Wait for VM to be ready
+        run: |
+          SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes -i /tmp/vm_key -p 2222 root@localhost"
+          echo "Polling for cloud-init completion and socat availability (up to 6 min)..."
+          for i in $(seq 72); do
+            if $SSH "test -f /var/lib/cloud/instance/boot-finished && command -v socat" \
+                >/dev/null 2>&1; then
+              echo "VM ready after ~$((i * 5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "VM did not become ready. QEMU log:" && cat /tmp/qemu.log
+          exit 1
+
+      # ── Test 1: host sends a random string, guest receives and validates ────
+      - name: Test host → guest
+        run: |
+          SSH="ssh -o StrictHostKeyChecking=no -i /tmp/vm_key -p 2222 root@localhost"
+          HOST_MSG="host_$(openssl rand -hex 8)"
+          echo "Sending from host: $HOST_MSG"
+
+          # socat listens on vsock port 5000 and writes incoming bytes to a
+          # file. CREATE truncates on open so stale content never leaks.
+          $SSH "socat VSOCK-LISTEN:5000 CREATE:/tmp/from_host.txt &"
+          sleep 1
+
+          # Host connects via the UDS CONNECT handshake and sends the message.
+          (printf "CONNECT 5000\n"; sleep 0.3; printf "%s\n" "$HOST_MSG"; sleep 0.5) \
+            | nc -U /tmp/vm4.vsock
+          sleep 1
+
+          GOT=$($SSH "cat /tmp/from_host.txt")
+          echo "Guest received: [$GOT]"
+          echo "$GOT" | grep -qF "$HOST_MSG" \
+            || { echo "FAIL host→guest: expected '$HOST_MSG'"; exit 1; }
+          echo "PASS host→guest"
+
+      # ── Test 2: guest sends a random string, host receives and validates ────
+      - name: Test guest → host
+        run: |
+          SSH="ssh -o StrictHostKeyChecking=no -i /tmp/vm_key -p 2222 root@localhost"
+          GUEST_MSG="guest_$(openssl rand -hex 8)"
+          echo "Expecting from guest: $GUEST_MSG"
+
+          # socat listens on vsock port 5001. When the host connects,
+          # socat runs `echo $GUEST_MSG` and pipes its output over vsock.
+          # Using EXEC avoids any stdin-pipe timing race.
+          $SSH "socat VSOCK-LISTEN:5001 EXEC:\"echo $GUEST_MSG\" &"
+          sleep 1
+
+          # Host connects and captures what the guest sends.
+          GOT=$( (printf "CONNECT 5001\n"; sleep 1) | nc -U /tmp/vm4.vsock )
+          echo "Host received: [$GOT]"
+          echo "$GOT" | grep -qF "$GUEST_MSG" \
+            || { echo "FAIL guest→host: expected '$GUEST_MSG'"; exit 1; }
+          echo "PASS guest→host"
+
+      - name: Stop VM and daemon
+        if: always()
+        run: |
+          kill "$(cat /tmp/qemu_pid)"  2>/dev/null || true
+          kill "$(cat /tmp/vhost_pid)" 2>/dev/null || true
