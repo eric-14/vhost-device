@@ -119,7 +119,7 @@ jobs:
             -drive file=/tmp/seed.iso,format=raw,if=virtio \
             -netdev user,id=net0,hostfwd=tcp::2222-:22 \
             -device virtio-net-pci,netdev=net0 \
-            -chardev socket,id=char0,reconnect=0,path=/tmp/vhost4.socket \
+            -chardev socket,id=char0,path=/tmp/vhost4.socket \
             -device vhost-user-vsock-pci,chardev=char0 \
             -nographic \
             2>&1 | tee /tmp/qemu.log &
