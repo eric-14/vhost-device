@@ -47,18 +47,28 @@ jobs:
       - name: Generate VM SSH key
         run: ssh-keygen -t ed25519 -f /tmp/vm_key -N ""
 
-      - name: Cache Alpine Linux cloud image
+      # vhost-user-vsock-pci is present in QEMU's x86_64 default device config
+      # (x86_64-softmmu.mak) but absent from the aarch64 config, which is why
+      # the README's working examples all use qemu-system-x86_64.  On Apple
+      # Silicon the runner uses TCG to emulate x86_64 (cross-arch), which is
+      # slower than same-ISA TCG but is the only path that has the device.
+      - name: Verify QEMU has vhost-user-vsock-pci
+        run: |
+          qemu-system-x86_64 -device help 2>&1 | grep -F 'vhost-user-vsock-pci' \
+            || { echo "ERROR: vhost-user-vsock-pci not in this QEMU build"; exit 1; }
+
+      - name: Cache Alpine Linux x86_64 cloud image
         id: cache-alpine
         uses: actions/cache@v4
         with:
           path: alpine.qcow2
-          key: alpine-3.21.0-aarch64-cloudinit-v1
+          key: alpine-3.21.0-x86_64-bios-cloudinit-v1
 
-      - name: Download Alpine Linux aarch64 cloud image
+      - name: Download Alpine Linux x86_64 BIOS cloud image
         if: steps.cache-alpine.outputs.cache-hit != 'true'
         run: |
           curl -fL \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-aarch64-uefi-cloudinit-r0.qcow2" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.0-x86_64-bios-cloudinit-r0.qcow2" \
             -o alpine.qcow2
 
       - name: Create cloud-init seed ISO
@@ -106,18 +116,15 @@ jobs:
 
       - name: Start QEMU VM
         run: |
-          # GitHub Actions macOS runners are themselves VMs; Apple's
-          # Hypervisor.framework does not support nested virtualisation, so
-          # accel=hvf is unavailable.  TCG emulates the same ISA (aarch64) as
-          # the Apple Silicon host, so it is substantially faster than
-          # cross-architecture TCG would be.
-          UEFI_FW="$(brew --prefix)/share/qemu/edk2-aarch64-code.fd"
-          qemu-system-aarch64 \
-            -machine virt,accel=tcg \
-            -cpu cortex-a57 \
+          # HVF is unavailable in GH Actions VMs (no nested virtualisation).
+          # x86_64 TCG on Apple Silicon is cross-arch but vhost-user-vsock-pci
+          # is only compiled into qemu-system-x86_64, not qemu-system-aarch64.
+          # No UEFI firmware needed; the BIOS cloud image uses SeaBIOS.
+          qemu-system-x86_64 \
+            -machine q35,accel=tcg \
+            -cpu qemu64 \
             -smp 2 \
             -m 512M \
-            -bios "$UEFI_FW" \
             -drive file=alpine.qcow2,format=qcow2,if=virtio,snapshot=on \
             -drive file=/tmp/seed.iso,format=raw,if=virtio \
             -netdev user,id=net0,hostfwd=tcp::2222-:22 \
@@ -131,8 +138,10 @@ jobs:
       - name: Wait for VM to be ready
         run: |
           SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes -i /tmp/vm_key -p 2222 root@localhost"
-          echo "Polling for cloud-init completion and socat availability (up to 10 min)..."
-          for i in $(seq 120); do
+          # x86_64 TCG on Apple Silicon is cross-arch emulation and noticeably
+          # slower than same-ISA TCG; 25 min covers cloud-init + apk add socat.
+          echo "Polling for cloud-init completion and socat availability (up to 25 min)..."
+          for i in $(seq 300); do
             if $SSH "test -f /var/lib/cloud/instance/boot-finished && command -v socat" \
                 >/dev/null 2>&1; then
               echo "VM ready after ~$((i * 5))s"
