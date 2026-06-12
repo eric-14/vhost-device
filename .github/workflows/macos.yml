@@ -106,12 +106,15 @@ jobs:
 
       - name: Start QEMU VM
         run: |
-          # snapshot=on keeps the cached qcow2 pristine; cloud-init installs
-          # socat on every boot via apk (fast from CDN cache).
+          # GitHub Actions macOS runners are themselves VMs; Apple's
+          # Hypervisor.framework does not support nested virtualisation, so
+          # accel=hvf is unavailable.  TCG emulates the same ISA (aarch64) as
+          # the Apple Silicon host, so it is substantially faster than
+          # cross-architecture TCG would be.
           UEFI_FW="$(brew --prefix)/share/qemu/edk2-aarch64-code.fd"
           qemu-system-aarch64 \
-            -machine virt,accel=hvf \
-            -cpu host \
+            -machine virt,accel=tcg \
+            -cpu cortex-a57 \
             -smp 2 \
             -m 512M \
             -bios "$UEFI_FW" \
@@ -128,8 +131,8 @@ jobs:
       - name: Wait for VM to be ready
         run: |
           SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o BatchMode=yes -i /tmp/vm_key -p 2222 root@localhost"
-          echo "Polling for cloud-init completion and socat availability (up to 6 min)..."
-          for i in $(seq 72); do
+          echo "Polling for cloud-init completion and socat availability (up to 10 min)..."
+          for i in $(seq 120); do
             if $SSH "test -f /var/lib/cloud/instance/boot-finished && command -v socat" \
                 >/dev/null 2>&1; then
               echo "VM ready after ~$((i * 5))s"
